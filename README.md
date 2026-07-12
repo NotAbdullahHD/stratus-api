@@ -22,9 +22,8 @@ bun api.js
 ```
 
 ## credits
-x8r - dev
-
-technonyte - dev
-
-claude - very *heavy* assistance
-
+* x8r
+* technonyte
+* clawd cod (the sexiest cli in the history of earth and agentic generative ai)
+* chatgpt (i mean it's alright)
+* gemini (go fuck yourself)
