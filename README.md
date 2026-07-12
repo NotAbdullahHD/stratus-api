@@ -22,9 +22,9 @@ bun api.js
 ```
 
 ## credits
-x8r - lead dev
+x8r - dev
 
-technonyte - other dev
+technonyte - dev
 
 claude - very *heavy* assistance
 
