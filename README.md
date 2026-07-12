@@ -23,5 +23,8 @@ bun api.js
 
 ## credits
 x8r - lead dev
+
 technonyte - other dev
+
 claude - very *heavy* assistance
+
