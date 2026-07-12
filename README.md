@@ -20,3 +20,8 @@ cd api
 bun i # or whatever pkg manager you use
 bun api.js
 ```
+
+## credits
+x8r - lead dev
+technonyte - other dev
+claude - very *heavy* assistance
