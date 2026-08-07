@@ -3,6 +3,7 @@ const { randomUUID, createDecipheriv } = require("crypto");
 const { readFileSync } = require("fs");
 const { WebSocketServer, WebSocket } = require("ws");
 const { createServer } = require("http");
+const dns = require("dns");
 const path = require("path");
 const chalk = require("chalk");
 
@@ -18,11 +19,60 @@ try {
   process.exit(1);
 }
 
-const sessions = new Map(); // uuid → session
-const siteUsage = new Map(); // api_key → timestamp[]
-const ipLimits = new Map(); // ip → timestamp[]
-const embedIpLimits = new Map(); // ip → timestamp[]
-const accountCreating = new Map(); // api_key → count
+const RACCOON_HOST = "www.raccoongame.com";
+const RACCOON_TIMEOUT_MS = 20_000;
+let raccoonIpCache = null;
+
+async function resolveRaccoonIp() {
+  if (raccoonIpCache && raccoonIpCache.expiresAt > Date.now())
+    return raccoonIpCache;
+  for (const family of [4, 6]) {
+    try {
+      const addrs =
+        family === 4
+          ? await dns.promises.resolve4(RACCOON_HOST)
+          : await dns.promises.resolve6(RACCOON_HOST);
+      if (addrs?.length) {
+        const ip = addrs[Math.floor(Math.random() * addrs.length)];
+        raccoonIpCache = { ip, family, expiresAt: Date.now() + 5 * 60_000 };
+        return raccoonIpCache;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+async function fetchWithTimeout(url, opts = {}, ms = RACCOON_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function raccoonFetch(pathAndQuery, opts = {}) {
+  const entry = await resolveRaccoonIp();
+  if (!entry)
+    return fetchWithTimeout(`https://${RACCOON_HOST}${pathAndQuery}`, opts);
+  const authority = entry.family === 6 ? `[${entry.ip}]` : entry.ip;
+  try {
+    return await fetchWithTimeout(`https://${authority}${pathAndQuery}`, {
+      ...opts,
+      headers: { ...opts.headers, Host: RACCOON_HOST },
+    });
+  } catch {
+    raccoonIpCache = null;
+    return fetchWithTimeout(`https://${RACCOON_HOST}${pathAndQuery}`, opts);
+  }
+}
+
+const sessions = new Map();
+const siteUsage = new Map();
+const ipLimits = new Map();
+const embedIpLimits = new Map();
+const accountCreating = new Map();
 
 const MAX_SESSION_SECONDS = 19 * 60;
 
@@ -58,14 +108,16 @@ async function getVerificationCode(mailJwt, maxRetries = 30) {
   for (let i = 0; i < maxRetries; i++) {
     await new Promise((r) => setTimeout(r, 3000));
     try {
-      const res = await fetch("https://api.mail.tm/messages?page=1", {
+      const res = await fetchWithTimeout("https://api.mail.tm/messages?page=1", {
         headers,
       });
       const data = await res.json();
       if (data["hydra:member"]?.length > 0) {
         const msgId = data["hydra:member"][0].id;
         const full = await (
-          await fetch(`https://api.mail.tm/messages/${msgId}`, { headers })
+          await fetchWithTimeout(`https://api.mail.tm/messages/${msgId}`, {
+            headers,
+          })
         ).json();
         const match = (full.text || full.html || "")
           .replace(/<[^>]*>/g, "")
@@ -77,8 +129,48 @@ async function getVerificationCode(mailJwt, maxRetries = 30) {
   throw new Error("Timeout getting verification code");
 }
 
+const POOL_TARGET = 5;
+const pool = [];
+let poolFilling = false;
+
+async function fillPool() {
+  if (poolFilling) return;
+  const needed = POOL_TARGET - pool.length;
+  if (needed <= 0) return;
+  poolFilling = true;
+  try {
+    for (let i = 0; i < needed; i++) {
+      try {
+        const acc = await createAccountRaw();
+        pool.push(acc);
+        logSys(chalk.gray(`pool: ready (${pool.length}/${POOL_TARGET})`));
+      } catch (e) {
+        logSys(chalk.red(`pool: fill error — ${e.message}`));
+        break;
+      }
+    }
+  } finally {
+    poolFilling = false;
+  }
+}
+
 async function createAccount() {
-  const domainData = await (await fetch("https://api.mail.tm/domains")).json();
+  if (pool.length > 0) {
+    const acc = pool.shift();
+    logSys(chalk.gray(`pool: served account (${pool.length} remaining)`));
+    fillPool().catch(() => {});
+    return acc;
+  }
+  logSys(chalk.gray("pool: miss — creating account on demand"));
+  const acc = await createAccountRaw();
+  fillPool().catch(() => {});
+  return acc;
+}
+
+async function createAccountRaw() {
+  const domainData = await (
+    await fetchWithTimeout("https://api.mail.tm/domains")
+  ).json();
   if (!domainData["hydra:member"]?.length)
     throw new Error("No Mail.tm domains available");
   const domain = domainData["hydra:member"][0].domain;
@@ -89,14 +181,14 @@ async function createAccount() {
   const raccoonPassword = generatePassword();
   const sn = generateSN();
 
-  const regRes = await fetch("https://api.mail.tm/accounts", {
+  const regRes = await fetchWithTimeout("https://api.mail.tm/accounts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ address: email, password: mailPassword }),
   });
   if (!regRes.ok) throw new Error("Failed to register Mail.tm mailbox");
 
-  const tokenRes = await fetch("https://api.mail.tm/token", {
+  const tokenRes = await fetchWithTimeout("https://api.mail.tm/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ address: email, password: mailPassword }),
@@ -118,7 +210,7 @@ async function createAccount() {
     os: "web",
   };
 
-  await fetch("https://www.raccoongame.com/users/sendEmail", {
+  await raccoonFetch("/users/sendEmail", {
     method: "POST",
     headers: h,
     body: new URLSearchParams({ email, type: "register", ...base }),
@@ -126,7 +218,7 @@ async function createAccount() {
 
   const code = await getVerificationCode(mailJwt);
 
-  await fetch("https://www.raccoongame.com/users/emailRegister", {
+  await raccoonFetch("/users/emailRegister", {
     method: "POST",
     headers: h,
     body: new URLSearchParams({
@@ -139,7 +231,7 @@ async function createAccount() {
     }),
   });
 
-  const loginRes = await fetch("https://www.raccoongame.com/users/emailLogin", {
+  const loginRes = await raccoonFetch("/users/emailLogin", {
     method: "POST",
     headers: h,
     body: new URLSearchParams({ email, password: raccoonPassword, ...base }),
@@ -184,14 +276,14 @@ async function doInitGame(session) {
     user_token: token,
   };
 
-  await fetch("https://www.raccoongame.com/userGame/checkCost", {
+  await raccoonFetch("/userGame/checkCost", {
     method: "POST",
     headers: h,
     body: new URLSearchParams({ ...common, game_key }),
   });
 
   const playData = await (
-    await fetch("https://www.raccoongame.com/jyapi/playGame", {
+    await raccoonFetch("/jyapi/playGame", {
       method: "POST",
       headers: h,
       body: new URLSearchParams({
@@ -225,7 +317,7 @@ async function doInitGame(session) {
 async function doPollQueue(session, queue_id) {
   const { sn, token } = session;
   const d = await (
-    await fetch("https://www.raccoongame.com/jyapi/playQueue", {
+    await raccoonFetch("/jyapi/playQueue", {
       method: "POST",
       headers: gameHeaders(token),
       body: new URLSearchParams({
@@ -249,7 +341,7 @@ async function doPollQueue(session, queue_id) {
 async function doClaimGame(session, queue_id) {
   const { sn, token, game_key } = session;
   const d = await (
-    await fetch("https://www.raccoongame.com/jyapi/playGame", {
+    await raccoonFetch("/jyapi/playGame", {
       method: "POST",
       headers: gameHeaders(token),
       body: new URLSearchParams({
@@ -276,7 +368,7 @@ async function doStopGame(session) {
   session.raccoonWs?.close();
   if (!session.sc_id) return;
   try {
-    await fetch("https://www.raccoongame.com/jyapi/stopGame", {
+    await raccoonFetch("/jyapi/stopGame", {
       method: "POST",
       headers: gameHeaders(session.token),
       body: new URLSearchParams({
@@ -298,7 +390,7 @@ async function doStopGame(session) {
 async function doCost(session) {
   if (!session.sc_id) return;
   try {
-    await fetch("https://www.raccoongame.com/userGame/cost", {
+    const res = await raccoonFetch("/userGame/cost", {
       method: "POST",
       headers: gameHeaders(session.token),
       body: new URLSearchParams({
@@ -314,11 +406,20 @@ async function doCost(session) {
         user_token: session.token,
       }),
     });
-  } catch {}
+    const body = await res.json().catch(() => null);
+    logApi(
+      session.api_key,
+      chalk.gray(`doCost → ${res.status} ${JSON.stringify(body)}`),
+    );
+    if (body?.status === 3013) {
+      killSession(session.uuid, "upstream_terminated");
+    }
+  } catch (e) {
+    logApi(session.api_key, chalk.red(`doCost error: ${e.message}`));
+  }
 }
 
-function logApi(apiKey, message) {
-  const name = getSiteName(apiKey) || "unknown";
+function timestamp() {
   const now = new Date();
   const time = now.toLocaleTimeString("en-US", {
     hour: "numeric",
@@ -331,9 +432,16 @@ function logApi(apiKey, message) {
     day: "numeric",
     year: "2-digit",
   });
-  console.log(
-    `${chalk.blackBright(`[${time} ${date}]`)} ${chalk.cyan(name)} ${message}`,
-  );
+  return chalk.blackBright(`[${time} ${date}]`);
+}
+
+function logApi(apiKey, message) {
+  const name = getSiteName(apiKey) || "unknown";
+  console.log(`${timestamp()} ${chalk.cyan(name)} ${message}`);
+}
+
+function logSys(message) {
+  console.log(`${timestamp()} ${chalk.magenta("stratus")} ${message}`);
 }
 
 function getClientIp(req) {
@@ -482,26 +590,34 @@ function resetPingTimeout(uuid) {
 
 const REAPER_DEADLINES = {
   creating: 5 * 60_000,
-  queued: 10 * 60_000,
   finished_queue: 2 * 60_000,
 };
+const QUEUED_MAX_AGE = 30 * 60_000;
+const QUEUED_POLL_STALE_AFTER = 90_000;
 
 setInterval(() => {
   const now = Date.now();
   for (const [uuid, session] of sessions) {
+    if (session.state === "queued") {
+      const lastSeen = session.last_queue_poll_at ?? session.created_at;
+      if (
+        now - lastSeen > QUEUED_POLL_STALE_AFTER ||
+        now - session.created_at > QUEUED_MAX_AGE
+      ) {
+        killSession(uuid, "reaper:queued_stale");
+      }
+      continue;
+    }
     const deadline = REAPER_DEADLINES[session.state];
     if (deadline !== undefined && now - session.created_at > deadline) {
       killSession(uuid, `reaper:${session.state}_deadline`);
       continue;
     }
-    // Active sessions with no session_timeout set — shouldn't happen, nuke anyway
     if (session.state === "active" && !session.session_timeout) {
       killSession(uuid, "reaper:active_no_timeout");
     }
   }
-}, 2 * 60_000);
-
-// ── Raccoon signaling proxy (per API session) ──────────────────────────────
+}, 2 * 60_000).unref?.();
 
 function connectRaccoonSignaling(session) {
   const { sn, gl_key, play_config, uuid } = session;
@@ -614,11 +730,9 @@ app.use((req, res, next) => {
   const ip = getClientIp(req);
 
   if (!checkIpLimit(ipLimits, ip, 60_000, 100)) {
-    return res
-      .status(429)
-      .json({
-        error: "Too many requests from this IP. Try again in a minute.",
-      });
+    return res.status(429).json({
+      error: "Too many requests from this IP. Try again in a minute.",
+    });
   }
 
   req.setTimeout(30_000, () => {
@@ -658,13 +772,6 @@ app.get("/cloud/v1/embed-data", (req, res) => {
   });
 });
 
-//    { "status": "creating_account" }
-//    { "status": "account_ready" }
-//    { "status": "requesting_game" }
-//    { "status": "queue",          "uuid": "...", "queue_pos": N }
-//    { "status": "finished_queue", "uuid": "...", "fetch_this_within_30s_or_terminate": "/cloud/v1/startGame" }
-//    { "status": "error",          "error": "..." }
-
 app.post("/cloud/v1/createSession", auth, async (req, res) => {
   const { game_key } = req.body;
   if (!game_key || typeof game_key !== "string" || game_key.length > 256) {
@@ -674,11 +781,9 @@ app.post("/cloud/v1/createSession", auth, async (req, res) => {
   const { site, apiKey } = req;
 
   if (countActiveSessions(apiKey) >= site.max_concurrent_sessions) {
-    return res
-      .status(429)
-      .json({
-        error: `Concurrent session limit reached (max ${site.max_concurrent_sessions}).`,
-      });
+    return res.status(429).json({
+      error: `Concurrent session limit reached (max ${site.max_concurrent_sessions}).`,
+    });
   }
 
   const rl = checkRateLimit(apiKey, site);
@@ -965,15 +1070,6 @@ app.post("/cloud/v1/quitSession", auth, (req, res) => {
   res.json({ status: "ok" });
 });
 
-//  Client → Server:
-//    { "type": "rtc_offer",     "sdp": "..."       }
-//    { "type": "rtc_candidate", "candidate": "..." }
-//
-//  Server → Client:
-//    { "type": "game_ready"                        }  ← wait for this before sending offer
-//    { "type": "rtc_answer",    "sdp": { ... }     }
-//    { "type": "rtc_candidate", "candidate": "..." }
-
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
@@ -1046,7 +1142,7 @@ setInterval(() => {
     if (recent.length === 0) embedIpLimits.delete(ip);
     else embedIpLimits.set(ip, recent);
   }
-}, 60_000);
+}, 60_000).unref?.();
 
 httpServer.listen(PORT, () => {
   const label = (s) => chalk.dim(s.padStart(12));
@@ -1062,6 +1158,7 @@ httpServer.listen(PORT, () => {
       "  " +
       chalk.white(`${MAX_SESSION_SECONDS / 60}m max session`),
   );
+  console.log(label("pool") + "  " + chalk.white(`${POOL_TARGET} accounts`));
   console.log("");
 
   siteList.forEach(([name, cfg]) => {
@@ -1076,4 +1173,6 @@ httpServer.listen(PORT, () => {
   });
 
   console.log("");
+
+  fillPool().catch(() => {});
 });
