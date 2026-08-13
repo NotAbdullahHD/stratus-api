@@ -100,54 +100,30 @@ function generatePassword() {
   return p;
 }
 
-// Maildrop.cc GraphQL code checker (Fixed Indexing)
-async function getVerificationCode(mailbox, maxRetries = 30) {
-  const query = `
-    query GetInbox($mailbox: String!) {
-      inbox(mailbox: $mailbox) {
-        id
-        subject
-      }
-    }
-  `;
+// 1secmail API code checker (No Greylisting, Instant JSON Parsing)
+async function getVerificationCode(mailUser, maxRetries = 30) {
+  const domain = "1secmail.com";
   for (let i = 0; i < maxRetries; i++) {
     await new Promise((r) => setTimeout(r, 3000));
     try {
-      const res = await fetchWithTimeout("https://maildrop.cc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, variables: { mailbox } }),
-      });
-      const jsonRes = await res.json();
-      const messages = jsonRes?.data?.inbox;
+      const res = await fetchWithTimeout(`https://1secmail.com{mailUser}&domain=${domain}`);
+      const messages = await res.json();
       
-      // Fixed: Grab the id using the [0] index array element
       if (messages && messages.length > 0) {
         const msgId = messages[0].id;
-        const msgQuery = `
-          query GetMessage($mailbox: String!, $id: String!) {
-            message(mailbox: $mailbox, id: $id) {
-              body
-            }
-          }
-        `;
-        const msgRes = await fetchWithTimeout("https://maildrop.cc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: msgQuery, variables: { mailbox, id: msgId } }),
-        });
-        const msgData = await msgRes.json();
-        const content = msgData?.data?.message?.body || "";
+        const detailRes = await fetchWithTimeout(`https://1secmail.com{mailUser}&domain=${domain}&id=${msgId}`);
+        const fullMsg = await detailRes.json();
+        
+        const content = (fullMsg.textBody || fullMsg.body || fullMsg.subject || "");
         const match = content.replace(/<[^>]*>/g, "").match(/\b\d{6}\b/);
         if (match) return match[0];
       }
     } catch (e) {
-      console.error("Maildrop read failure:", e);
+      console.error("Temp mail read failure:", e);
     }
   }
-  throw new Error("Timeout getting verification code via Maildrop");
+  throw new Error("Timeout getting verification code via Temp Mail");
 }
-
 
 const POOL_TARGET = 5;
 const pool = [];
@@ -192,8 +168,9 @@ async function createAccount() {
 }
 
 async function createAccountRaw() {
+  // Generate random username target using 1secmail domain
   const mailUser = "str" + Math.random().toString(36).substring(2, 10);
-  const email = `${mailUser}@maildrop.cc`;
+  const email = `${mailUser}@1secmail.com`;
   const raccoonPassword = generatePassword();
   const sn = generateSN();
 
@@ -246,6 +223,10 @@ async function createAccountRaw() {
     const m = cookie.match(/as_user_token=([^;]+)/);
     if (m) userToken = m[1];
   }
+
+  return { sn, token: userToken };
+}
+
 
   return { sn, token: userToken };
 }
