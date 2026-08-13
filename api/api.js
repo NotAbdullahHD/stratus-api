@@ -100,38 +100,58 @@ function generatePassword() {
   return p;
 }
 
-async function getVerificationCode(mailJwt, maxRetries = 30) {
-  const headers = {
-    Authorization: `Bearer ${mailJwt}`,
-    "Content-Type": "application/json",
-  };
+// Maildrop.cc GraphQL code checker
+async function getVerificationCode(mailbox, maxRetries = 30) {
+  const query = `
+    query GetInbox($mailbox: String!) {
+      inbox(mailbox: $mailbox) {
+        id
+        subject
+      }
+    }
+  `;
   for (let i = 0; i < maxRetries; i++) {
     await new Promise((r) => setTimeout(r, 3000));
     try {
-      const res = await fetchWithTimeout("https://api.mail.tm/messages?page=1", {
-        headers,
+      const res = await fetchWithTimeout("https://maildrop.cc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, variables: { mailbox } }),
       });
       const data = await res.json();
-      if (data["hydra:member"]?.length > 0) {
-        const msgId = data["hydra:member"][0].id;
-        const full = await (
-          await fetchWithTimeout(`https://api.mail.tm/messages/${msgId}`, {
-            headers,
-          })
-        ).json();
-        const match = (full.text || full.html || "")
-          .replace(/<[^>]*>/g, "")
-          .match(/\b\d{6}\b/);
+      if (data?.data?.inbox?.length > 0) {
+        const msgId = data.data.inbox[0].id;
+        const msgQuery = `
+          query GetMessage($mailbox: String!, $id: String!) {
+            message(mailbox: $mailbox, id: $id) {
+              body
+            }
+          }
+        `;
+        const msgRes = await fetchWithTimeout("https://maildrop.cc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: msgQuery, variables: { mailbox, id: msgId } }),
+        });
+        const msgData = await msgRes.json();
+        const content = msgData?.data?.message?.body || "";
+        const match = content.replace(/<[^>]*>/g, "").match(/\b\d{6}\b/);
         if (match) return match[0];
       }
-    } catch {}
+    } catch (e) {
+      console.error("Maildrop check step failed:", e);
+    }
   }
-  throw new Error("Timeout getting verification code");
+  throw new Error("Timeout getting verification code via Maildrop");
 }
 
 const POOL_TARGET = 5;
 const pool = [];
 let poolFilling = false;
+
+function logSys(msg) {
+  console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
+}
 
 async function fillPool() {
   if (poolFilling) return;
@@ -168,33 +188,10 @@ async function createAccount() {
 }
 
 async function createAccountRaw() {
-  const domainData = await (
-    await fetchWithTimeout("https://api.mail.tm/domains")
-  ).json();
-  if (!domainData["hydra:member"]?.length)
-    throw new Error("No Mail.tm domains available");
-  const domain = domainData["hydra:member"][0].domain;
-
-  const mailUser = `rcn_${Math.random().toString(36).substring(2, 11)}`;
-  const email = `${mailUser}@${domain}`;
-  const mailPassword = generatePassword();
+  const mailUser = "str" + Math.random().toString(36).substring(2, 10);
+  const email = `${mailUser}@maildrop.cc`;
   const raccoonPassword = generatePassword();
   const sn = generateSN();
-
-  const regRes = await fetchWithTimeout("https://api.mail.tm/accounts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ address: email, password: mailPassword }),
-  });
-  if (!regRes.ok) throw new Error("Failed to register Mail.tm mailbox");
-
-  const tokenRes = await fetchWithTimeout("https://api.mail.tm/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ address: email, password: mailPassword }),
-  });
-  if (!tokenRes.ok) throw new Error("Failed to get Mail.tm token");
-  const { token: mailJwt } = await tokenRes.json();
 
   const h = {
     "Content-Type": "application/x-www-form-urlencoded",
@@ -216,7 +213,7 @@ async function createAccountRaw() {
     body: new URLSearchParams({ email, type: "register", ...base }),
   });
 
-  const code = await getVerificationCode(mailJwt);
+  const code = await getVerificationCode(mailUser);
 
   await raccoonFetch("/users/emailRegister", {
     method: "POST",
@@ -254,8 +251,8 @@ function gameHeaders(token) {
     accept: "*/*",
     "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
     cookie: `as_user_token=${token}`,
-    origin: "https://www.raccoongame.com",
-    referer: "https://www.raccoongame.com/?t=1720436119",
+    origin: "https://raccoongame.com",
+    referer: "https://raccoongame.com/?t=1720436119",
     "user-agent":
       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/147.0.0.0 Safari/537.36",
     "x-requested-with": "XMLHttpRequest",
@@ -279,7 +276,7 @@ async function doInitGame(session) {
   await raccoonFetch("/userGame/checkCost", {
     method: "POST",
     headers: h,
-    body: new URLSearchParams({ ...common, game_key }),
+    body: new URLSearchParams({ gid: game_key, ...common }),
   });
 
   const playData = await (
