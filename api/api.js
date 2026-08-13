@@ -100,7 +100,7 @@ function generatePassword() {
   return p;
 }
 
-// Maildrop.cc GraphQL code checker (Fixed Array Parsing)
+// Maildrop.cc GraphQL code checker (Fixed Indexing)
 async function getVerificationCode(mailbox, maxRetries = 30) {
   const query = `
     query GetInbox($mailbox: String!) {
@@ -121,7 +121,7 @@ async function getVerificationCode(mailbox, maxRetries = 30) {
       const jsonRes = await res.json();
       const messages = jsonRes?.data?.inbox;
       
-      // Fixed: Verify the array exists and grab the first [0] object item
+      // Fixed: Grab the id using the [0] index array element
       if (messages && messages.length > 0) {
         const msgId = messages[0].id;
         const msgQuery = `
@@ -147,6 +147,7 @@ async function getVerificationCode(mailbox, maxRetries = 30) {
   }
   throw new Error("Timeout getting verification code via Maildrop");
 }
+
 
 const POOL_TARGET = 5;
 const pool = [];
