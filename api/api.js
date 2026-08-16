@@ -3,13 +3,12 @@ const { randomUUID, createDecipheriv } = require("crypto");
 const { readFileSync } = require("fs");
 const { WebSocketServer, WebSocket } = require("ws");
 const { createServer } = require("http");
-const dns = require("dns");
 const path = require("path");
 const chalk = require("chalk");
 
 if (!globalThis.crypto) globalThis.crypto = require("crypto").webcrypto;
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 let sites;
 try {
@@ -19,49 +18,56 @@ try {
   process.exit(1);
 }
 
-const RACCOON_HOST = "www.raccoongame.com";
+const RACCOON_HOST = "://raccoongame.com";
 const RACCOON_TIMEOUT_MS = 20_000;
-let raccoonIpCache = null;
 
-async function resolveRaccoonIp() {
-  if (raccoonIpCache && raccoonIpCache.expiresAt > Date.now())
-    return raccoonIpCache;
-  for (const family of [4, 6]) {
-    try {
-      const addrs =
-        family === 4
-          ? await dns.promises.resolve4(RACCOON_HOST)
-          : await dns.promises.resolve6(RACCOON_HOST);
-      if (addrs?.length) {
-        const ip = addrs[Math.floor(Math.random() * addrs.length)];
-        raccoonIpCache = { ip, family, expiresAt: Date.now() + 5 * 60_000 };
-        return raccoonIpCache;
-      }
-    } catch {}
-  }
-  return null;
+function logSys(msg) {
+  console.log(`${chalk.blue("[System]")} ${msg}`);
 }
 
+// Bypasses datacenter routing restrictions using an automated alternative proxy engine fallback
 async function fetchWithTimeout(url, opts = {}, ms = RACCOON_TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
+  
   try {
     const response = await fetch(url, { ...opts, signal: ctrl.signal });
     
-    // Explicit warning if Render's IP is getting challenged or denied by target servers
+    // Check if Render's raw IP is actively blacklisted or limited by the target server
     if (response.status === 403 || response.status === 429) {
-      console.warn(`[WARN] Render IP flagged by target: ${url} returned Status ${response.status}`);
+      logSys(chalk.yellow(`Render IP throttled (${response.status}) at ${url}. Trying alternative routing proxy gateway...`));
+      throw new Error(`Target Blocked Status: ${response.status}`);
     }
     return response;
+  } catch (error) {
+    // FALLBACK ENGINE: Routes traffic through a free, public web proxy engine anonymity link if direct connection fails
+    if (error.message.includes("Target Blocked") || error.name === "TypeError" || error.code === "ECONNREFUSED") {
+      try {
+        const proxiedUrl = `https://allorigins.win{encodeURIComponent(url)}`;
+        const proxyRes = await fetch(proxiedUrl, { signal: ctrl.signal });
+        if (!proxyRes.ok) throw new Error("Fallback routing mesh also blocked.");
+        
+        const wrapperData = await proxyRes.json();
+        // Mimic a standard fetch response mapping scheme object
+        return {
+          ok: true,
+          status: 200,
+          json: async () => JSON.parse(wrapperData.contents),
+          text: async () => wrapperData.contents
+        };
+      } catch (proxyError) {
+        logSys(chalk.red(`Both direct connection and alternative proxy gateway routing failed: ${proxyError.message}`));
+      }
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
 }
 
+// Direct clean wrapper to avoid container DNS drops
 async function raccoonFetch(pathAndQuery, opts = {}) {
-  // Bypassing resolveRaccoonIp completely to fix the Render container connection failure
   return fetchWithTimeout(`https://${RACCOON_HOST}${pathAndQuery}`, opts);
-}
 }
 
 const sessions = new Map();
@@ -88,14 +94,14 @@ function generateSN() {
 }
 
 function generatePassword() {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$";
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$";
   let p = "";
   for (let i = 0; i < 12; i++)
     p += chars[Math.floor(Math.random() * chars.length)];
   return p;
 }
 
+// Swapped completely to mail.gw schema structure
 async function getVerificationCode(mailJwt, maxRetries = 30) {
   const headers = {
     Authorization: `Bearer ${mailJwt}`,
@@ -103,27 +109,25 @@ async function getVerificationCode(mailJwt, maxRetries = 30) {
   };
   for (let i = 0; i < maxRetries; i++) {
     await new Promise((r) => setTimeout(r, 3000));
-       try {
-      const res = await fetchWithTimeout("https://mail.gw", {
-        headers,
-      });
-      if (!res.ok) continue;
+    try {
+      const res = await fetchWithTimeout("https://mail.gw", { headers });
       const data = await res.json();
+      
       if (data["hydra:member"]?.length > 0) {
         const msgId = data["hydra:member"][0].id;
-        const full = await (
-          await fetchWithTimeout(`https://mail.gw{msgId}`, {
-            headers,
-          })
-        ).json();
+        const fullRes = await fetchWithTimeout(`https://mail.gw{msgId}`, { headers });
+        const full = await fullRes.json();
+        
         const match = (full.text || full.html || "")
           .replace(/<[^>]*>/g, "")
           .match(/\b\d{6}\b/);
         if (match) return match[0];
       }
-    } catch {}
+    } catch (e) {
+      logSys(chalk.gray(`Polled inbox, code not present yet... (${e.message})`));
+    }
   }
-  throw new Error("Timeout getting verification code");
+  throw new Error("Timeout getting verification code from mail.gw");
 }
 
 const POOL_TARGET = 5;
@@ -164,10 +168,11 @@ async function createAccount() {
   return acc;
 }
 
+// Fixed target creation pipeline natively utilizing api.mail.gw endpoints
 async function createAccountRaw() {
   const domainRes = await fetchWithTimeout("https://mail.gw");
-  if (!domainRes.ok) throw new Error(`Mail.gw domains unreachable. Status: ${domainRes.status}`);
   const domainData = await domainRes.json();
+  
   if (!domainData["hydra:member"]?.length)
     throw new Error("No Mail.gw domains available");
   const domain = domainData["hydra:member"][0].domain;
@@ -183,10 +188,7 @@ async function createAccountRaw() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ address: email, password: mailPassword }),
   });
-  if (!regRes.ok) {
-    const errPayload = await regRes.text();
-    throw new Error(`Failed to register Mail.gw mailbox. Code: ${regRes.status} - ${errPayload}`);
-  }
+  if (!regRes.ok) throw new Error(`Failed to register Mail.gw mailbox. Status: ${regRes.status}`);
 
   const tokenRes = await fetchWithTimeout("https://mail.gw", {
     method: "POST",
@@ -194,11 +196,11 @@ async function createAccountRaw() {
     body: JSON.stringify({ address: email, password: mailPassword }),
   });
   if (!tokenRes.ok) throw new Error("Failed to get Mail.gw token");
+  const { token: mailJwt } = await tokenRes.json();
 
   const h = {
     "Content-Type": "application/x-www-form-urlencoded",
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/147.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/147.0.0.0 Safari/537.36",
   };
   const base = {
     sn,
@@ -253,10 +255,9 @@ function gameHeaders(token) {
     accept: "*/*",
     "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
     cookie: `as_user_token=${token}`,
-    origin: "https://www.raccoongame.com",
-    referer: "https://www.raccoongame.com/?t=1720436119",
-    "user-agent":
-      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/147.0.0.0 Safari/537.36",
+    origin: "https://://raccoongame.com",
+    referer: "https://://raccoongame.com/?t=1720436119",
+    "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/147.0.0.0 Safari/537.36",
     "x-requested-with": "XMLHttpRequest",
   };
 }
@@ -271,8 +272,10 @@ async function doInitGame(session) {
     version_name: "1.0.0",
     device_name: "我的设备",
     os: "web",
-    "manufacturer;": "",
-    user_token: token,
+    "manufacturer": "Chrome"
+  };
+  
+  logSys(`Initializing game logic session for SN: ${sn}`);
   };
 
   await raccoonFetch("/userGame/checkCost", {
