@@ -1,4 +1,12 @@
 const express = require("express");
+// Add after: const app = express();
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*'); // or your specific Cloudflare domain
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 const { randomUUID, createDecipheriv } = require("crypto");
 const { readFileSync } = require("fs");
 const { WebSocketServer, WebSocket } = require("ws");
