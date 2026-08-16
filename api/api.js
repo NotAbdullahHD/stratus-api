@@ -100,38 +100,38 @@ function generatePassword() {
   return p;
 }
 
-// 1secmail API code checker (No Greylisting, Instant JSON Parsing)
-async function getVerificationCode(mailUser, maxRetries = 30) {
-  const domain = "1secmail.com";
+async function getVerificationCode(mailJwt, maxRetries = 30) {
+  const headers = {
+    Authorization: `Bearer ${mailJwt}`,
+    "Content-Type": "application/json",
+  };
   for (let i = 0; i < maxRetries; i++) {
     await new Promise((r) => setTimeout(r, 3000));
     try {
-      const res = await fetchWithTimeout(`https://1secmail.com{mailUser}&domain=${domain}`);
-      const messages = await res.json();
-      
-      if (messages && messages.length > 0) {
-        const msgId = messages[0].id;
-        const detailRes = await fetchWithTimeout(`https://1secmail.com{mailUser}&domain=${domain}&id=${msgId}`);
-        const fullMsg = await detailRes.json();
-        
-        const content = (fullMsg.textBody || fullMsg.body || fullMsg.subject || "");
-        const match = content.replace(/<[^>]*>/g, "").match(/\b\d{6}\b/);
+      const res = await fetchWithTimeout("https://api.mail.tm/messages?page=1", {
+        headers,
+      });
+      const data = await res.json();
+      if (data["hydra:member"]?.length > 0) {
+        const msgId = data["hydra:member"][0].id;
+        const full = await (
+          await fetchWithTimeout(`https://api.mail.tm/messages/${msgId}`, {
+            headers,
+          })
+        ).json();
+        const match = (full.text || full.html || "")
+          .replace(/<[^>]*>/g, "")
+          .match(/\b\d{6}\b/);
         if (match) return match[0];
       }
-    } catch (e) {
-      console.error("Temp mail read failure:", e);
-    }
+    } catch {}
   }
-  throw new Error("Timeout getting verification code via Temp Mail");
+  throw new Error("Timeout getting verification code");
 }
 
 const POOL_TARGET = 5;
 const pool = [];
 let poolFilling = false;
-
-function logSys(msg) {
-  console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
-}
 
 async function fillPool() {
   if (poolFilling) return;
@@ -168,11 +168,33 @@ async function createAccount() {
 }
 
 async function createAccountRaw() {
-  // Generate random username target using 1secmail domain
-  const mailUser = "str" + Math.random().toString(36).substring(2, 10);
-  const email = `${mailUser}@1secmail.com`;
+  const domainData = await (
+    await fetchWithTimeout("https://api.mail.tm/domains")
+  ).json();
+  if (!domainData["hydra:member"]?.length)
+    throw new Error("No Mail.tm domains available");
+  const domain = domainData["hydra:member"][0].domain;
+
+  const mailUser = `rcn_${Math.random().toString(36).substring(2, 11)}`;
+  const email = `${mailUser}@${domain}`;
+  const mailPassword = generatePassword();
   const raccoonPassword = generatePassword();
   const sn = generateSN();
+
+  const regRes = await fetchWithTimeout("https://api.mail.tm/accounts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: email, password: mailPassword }),
+  });
+  if (!regRes.ok) throw new Error("Failed to register Mail.tm mailbox");
+
+  const tokenRes = await fetchWithTimeout("https://api.mail.tm/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: email, password: mailPassword }),
+  });
+  if (!tokenRes.ok) throw new Error("Failed to get Mail.tm token");
+  const { token: mailJwt } = await tokenRes.json();
 
   const h = {
     "Content-Type": "application/x-www-form-urlencoded",
@@ -194,7 +216,7 @@ async function createAccountRaw() {
     body: new URLSearchParams({ email, type: "register", ...base }),
   });
 
-  const code = await getVerificationCode(mailUser);
+  const code = await getVerificationCode(mailJwt);
 
   await raccoonFetch("/users/emailRegister", {
     method: "POST",
@@ -227,17 +249,13 @@ async function createAccountRaw() {
   return { sn, token: userToken };
 }
 
-
-  return { sn, token: userToken };
-}
-
 function gameHeaders(token) {
   return {
     accept: "*/*",
     "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
     cookie: `as_user_token=${token}`,
-    origin: "https://raccoongame.com",
-    referer: "https://raccoongame.com/?t=1720436119",
+    origin: "https://www.raccoongame.com",
+    referer: "https://www.raccoongame.com/?t=1720436119",
     "user-agent":
       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/147.0.0.0 Safari/537.36",
     "x-requested-with": "XMLHttpRequest",
@@ -261,7 +279,7 @@ async function doInitGame(session) {
   await raccoonFetch("/userGame/checkCost", {
     method: "POST",
     headers: h,
-    body: new URLSearchParams({ gid: game_key, ...common }),
+    body: new URLSearchParams({ ...common, game_key }),
   });
 
   const playData = await (
