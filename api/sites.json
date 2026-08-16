@@ -2,6 +2,7 @@
   "sites": {
     "ghostcloud.ghostos.workers.dev": {
       "name": "GhostCloud Launcher",
+      "api_key": "ghostcloud_prod_key_2024_x7k9m2pL4vN3qR8s",
       "cap": 20,
       "allowed": true,
       "enabled": true,
