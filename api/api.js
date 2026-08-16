@@ -46,26 +46,22 @@ async function fetchWithTimeout(url, opts = {}, ms = RACCOON_TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
   try {
-    return await fetch(url, { ...opts, signal: ctrl.signal });
+    const response = await fetch(url, { ...opts, signal: ctrl.signal });
+    
+    // Explicit warning if Render's IP is getting challenged or denied by target servers
+    if (response.status === 403 || response.status === 429) {
+      console.warn(`[WARN] Render IP flagged by target: ${url} returned Status ${response.status}`);
+    }
+    return response;
   } finally {
     clearTimeout(timer);
   }
 }
 
 async function raccoonFetch(pathAndQuery, opts = {}) {
-  const entry = await resolveRaccoonIp();
-  if (!entry)
-    return fetchWithTimeout(`https://${RACCOON_HOST}${pathAndQuery}`, opts);
-  const authority = entry.family === 6 ? `[${entry.ip}]` : entry.ip;
-  try {
-    return await fetchWithTimeout(`https://${authority}${pathAndQuery}`, {
-      ...opts,
-      headers: { ...opts.headers, Host: RACCOON_HOST },
-    });
-  } catch {
-    raccoonIpCache = null;
-    return fetchWithTimeout(`https://${RACCOON_HOST}${pathAndQuery}`, opts);
-  }
+  // Bypassing resolveRaccoonIp completely to fix the Render container connection failure
+  return fetchWithTimeout(`https://${RACCOON_HOST}${pathAndQuery}`, opts);
+}
 }
 
 const sessions = new Map();
@@ -107,15 +103,16 @@ async function getVerificationCode(mailJwt, maxRetries = 30) {
   };
   for (let i = 0; i < maxRetries; i++) {
     await new Promise((r) => setTimeout(r, 3000));
-    try {
-      const res = await fetchWithTimeout("https://api.mail.tm/messages?page=1", {
+       try {
+      const res = await fetchWithTimeout("https://mail.gw", {
         headers,
       });
+      if (!res.ok) continue;
       const data = await res.json();
       if (data["hydra:member"]?.length > 0) {
         const msgId = data["hydra:member"][0].id;
         const full = await (
-          await fetchWithTimeout(`https://api.mail.tm/messages/${msgId}`, {
+          await fetchWithTimeout(`https://mail.gw{msgId}`, {
             headers,
           })
         ).json();
@@ -168,11 +165,11 @@ async function createAccount() {
 }
 
 async function createAccountRaw() {
-  const domainData = await (
-    await fetchWithTimeout("https://api.mail.tm/domains")
-  ).json();
+  const domainRes = await fetchWithTimeout("https://mail.gw");
+  if (!domainRes.ok) throw new Error(`Mail.gw domains unreachable. Status: ${domainRes.status}`);
+  const domainData = await domainRes.json();
   if (!domainData["hydra:member"]?.length)
-    throw new Error("No Mail.tm domains available");
+    throw new Error("No Mail.gw domains available");
   const domain = domainData["hydra:member"][0].domain;
 
   const mailUser = `rcn_${Math.random().toString(36).substring(2, 11)}`;
@@ -181,20 +178,22 @@ async function createAccountRaw() {
   const raccoonPassword = generatePassword();
   const sn = generateSN();
 
-  const regRes = await fetchWithTimeout("https://api.mail.tm/accounts", {
+  const regRes = await fetchWithTimeout("https://mail.gw", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ address: email, password: mailPassword }),
   });
-  if (!regRes.ok) throw new Error("Failed to register Mail.tm mailbox");
+  if (!regRes.ok) {
+    const errPayload = await regRes.text();
+    throw new Error(`Failed to register Mail.gw mailbox. Code: ${regRes.status} - ${errPayload}`);
+  }
 
-  const tokenRes = await fetchWithTimeout("https://api.mail.tm/token", {
+  const tokenRes = await fetchWithTimeout("https://mail.gw", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ address: email, password: mailPassword }),
   });
-  if (!tokenRes.ok) throw new Error("Failed to get Mail.tm token");
-  const { token: mailJwt } = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error("Failed to get Mail.gw token");
 
   const h = {
     "Content-Type": "application/x-www-form-urlencoded",
