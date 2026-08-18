@@ -136,7 +136,7 @@ function generatePassword() {
   return p;
 }
 
-const MAIL_API_BASE = "https://api.mail.gw";
+const MAIL_API_BASE = "https://api.mail.tm";
 
 async function getDomain() {
   const response = await fetchWithTimeout(`${MAIL_API_BASE}/domains`);
