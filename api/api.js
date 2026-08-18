@@ -1,15 +1,4 @@
 const express = require("express");
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "https://ghostcloud.ghostos.workers.dev");
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key");
-  
-  // Handle preflight requests
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
-  next();
-});
 const { randomUUID, createDecipheriv } = require("crypto");
 const { readFileSync } = require("fs");
 const { WebSocketServer, WebSocket } = require("ws");
@@ -29,6 +18,42 @@ try {
   console.error("Failed to load sites.json:", e);
   process.exit(1);
 }
+
+// Create Express app
+const app = express();
+
+// CORS middleware - MUST come before other app.use() calls
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "https://ghostcloud.ghostos.workers.dev");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key");
+  
+  // Handle preflight requests
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Body parser middleware
+app.use(express.json({ limit: "1mb" }));
+
+// IP rate limiting middleware
+app.use((req, res, next) => {
+  const ip = getClientIp(req);
+
+  if (!checkIpLimit(ipLimits, ip, 60_000, 100)) {
+    return res.status(429).json({
+      error: "Too many requests from this IP. Try again in a minute.",
+    });
+  }
+
+  req.setTimeout(30_000, () => {
+    res.status(408).json({ error: "Request timeout." });
+  });
+
+  next();
+});
 
 const RACCOON_HOST = "www.raccoongame.com";
 const RACCOON_TIMEOUT_MS = 20_000;
@@ -736,28 +761,10 @@ function auth(req, res, next) {
   next();
 }
 
-const app = express();
-
-app.use(express.json({ limit: "1mb" }));
-
-app.use((req, res, next) => {
-  const ip = getClientIp(req);
-
-  if (!checkIpLimit(ipLimits, ip, 60_000, 100)) {
-    return res.status(429).json({
-      error: "Too many requests from this IP. Try again in a minute.",
-    });
-  }
-
-  req.setTimeout(30_000, () => {
-    res.status(408).json({ error: "Request timeout." });
-  });
-
-  next();
-});
-
+// Static files
 app.use(express.static(path.join(__dirname, "public")));
 
+// Routes
 app.get("/cloud/v1/embed", (req, res) => {
   if (!req.query.id) {
     return res.status(400).type("text").send("Missing `id` parameter");
