@@ -1,4 +1,15 @@
 const express = require("express");
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "https://ghostcloud.ghostos.workers.dev");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key");
+  
+  // Handle preflight requests
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
 const { randomUUID, createDecipheriv } = require("crypto");
 const { readFileSync } = require("fs");
 const { WebSocketServer, WebSocket } = require("ws");
