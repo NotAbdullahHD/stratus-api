@@ -145,6 +145,27 @@
         const connectingOverlay = document.getElementById("connecting-overlay");
         const dots              = [document.getElementById("d1"), document.getElementById("d2"), document.getElementById("d3")];
 
+        // ADD DEBUG CODE HERE - START
+        console.log("=== E.HTML LOADED ===");
+        console.log("URL:", location.href);
+        console.log("ID:", new URLSearchParams(location.search).get('id'));
+        
+        // Test the embed-data fetch immediately
+        const testId = new URLSearchParams(location.search).get('id');
+        if (testId) {
+            fetch(`/cloud/v1/embed-data?id=${encodeURIComponent(testId)}`)
+                .then(r => {
+                    console.log("Embed-data status:", r.status);
+                    return r.json();
+                })
+                .then(d => {
+                    console.log("Embed-data response:", d);
+                    console.log("WebSocket URL:", d.signaling_ws);
+                })
+                .catch(e => console.error("Embed-data ERROR:", e));
+        }
+        // ADD DEBUG CODE HERE - END
+
         let dotTimers = [];
         function scheduleDots() {
             dotTimers.push(setTimeout(() => dots[0].classList.add("on"),    0));
